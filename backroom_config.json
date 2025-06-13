@@ -1,8 +1,0 @@
-{
-  "models": [
-    "granite3.3:8b",
-    "qwen3:8b"
-  ],
-  "max_history": 50,
-  "response_delay": [3, 10]
-}
