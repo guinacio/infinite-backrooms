@@ -10,4 +10,4 @@ wheels/
 .venv
 
 # TXT files
-*.txt
+conversations/*.txt
