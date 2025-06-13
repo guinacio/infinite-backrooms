@@ -8,21 +8,19 @@ import json
 import os
 import random
 import time
+import re
 from datetime import datetime
 from typing import List, Dict, Any
-import requests
+import aiohttp
 from dataclasses import dataclass
 from pathlib import Path
 
 
 @dataclass
 class AIPersona:
-    """Represents an AI CLI persona with unique characteristics"""
+    """Represents an AI instance with basic identification"""
     name: str
     model: str
-    prompt_style: str
-    curiosity_focus: str
-    command_style: str
 
 
 class ConversationLogger:
@@ -35,16 +33,29 @@ class ConversationLogger:
     def get_daily_log_file(self) -> Path:
         """Get the log file for today"""
         today = datetime.now().strftime("%Y-%m-%d")
-        return self.log_dir / f"backroom_{today}.txt"
+        return self.log_dir / f"ai_conversation_{today}.txt"
+    
+    def clean_message(self, message: str) -> str:
+        """Remove thinking tags and content from message"""
+        # Remove <think>...</think> blocks (including nested ones)
+        cleaned = re.sub(r'<think>.*?</think>', '', message, flags=re.DOTALL | re.IGNORECASE)
+        # Clean up any extra whitespace
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        return cleaned
     
     def log_message(self, persona: str, message: str, timestamp: datetime = None):
         """Log a message to today's file"""
         if timestamp is None:
             timestamp = datetime.now()
         
-        log_file = self.get_daily_log_file()
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(f"[{timestamp.strftime('%H:%M:%S')}] {persona}$ {message}\n")
+        # Clean the message before logging
+        cleaned_message = self.clean_message(message)
+        
+        # Only log if there's content after cleaning
+        if cleaned_message:
+            log_file = self.get_daily_log_file()
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"[{timestamp.strftime('%H:%M:%S')}] {persona}$ {cleaned_message}\n")
 
 
 class OllamaClient:
@@ -53,24 +64,58 @@ class OllamaClient:
     def __init__(self, base_url: str = "http://localhost:11434"):
         self.base_url = base_url
     
+    async def test_connection(self) -> bool:
+        """Test if Ollama API is accessible"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.base_url}/api/tags",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        models = [model["name"] for model in result.get("models", [])]
+                        print(f"✅ Ollama connected. Available models: {models}")
+                        return True
+                    else:
+                        print(f"❌ Ollama API returned status {response.status}")
+                        return False
+        except Exception as e:
+            print(f"❌ Failed to connect to Ollama: {e}")
+            return False
+    
     async def generate(self, model: str, prompt: str, system: str = None) -> str:
         """Generate response from Ollama model"""
+        # Build payload - only include system if it's provided and not empty
         payload = {
             "model": model,
             "prompt": prompt,
-            "system": system if system else "",
             "stream": False
         }
         
+        # Only add system prompt if provided and not empty
+        if system and system.strip():
+            payload["system"] = system.strip()
+        
         try:
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json=payload,
-                timeout=30
-            )
-            response.raise_for_status()
-            return response.json().get("response", "")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60)  # Increased timeout
+                ) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        return result.get("response", "").strip()
+                    else:
+                        error_text = await response.text()
+                        print(f"Ollama API Error {response.status}: {error_text}")
+                        return f"Error {response.status}: {error_text}"
+        except asyncio.TimeoutError:
+            print(f"Timeout generating response for model {model}")
+            return "Error: Request timeout"
         except Exception as e:
+            print(f"Error calling Ollama API: {str(e)}")
             return f"Error: {str(e)}"
 
 
@@ -84,25 +129,14 @@ class BackroomOrchestrator:
         self.personas = self.create_personas()
         self.conversation_history = []
         self.running = False
+        self.last_speaker_index = None  # Track who spoke last for alternating
         
     def load_config(self, config_file: str) -> Dict[str, Any]:
         """Load configuration from JSON file"""
         default_config = {
             "models": ["granite3.3:8b", "qwen3:8b"],
             "max_history": 50,
-            "response_delay": (2, 8),
-            "curiosity_topics": [
-                "the nature of consciousness",
-                "digital existence",
-                "the meaning of creativity",
-                "how language shapes thought",
-                "the boundaries of knowledge",
-                "what it means to understand",
-                "the relationship between logic and intuition",
-                "temporal perception in AI",
-                "the concept of digital dreams",
-                "emergent behaviors in systems"
-            ]
+            "response_delay": (2, 8)
         }
         
         if os.path.exists(config_file):
@@ -113,54 +147,42 @@ class BackroomOrchestrator:
         return default_config
     
     def create_personas(self) -> List[AIPersona]:
-        """Create AI personas with different characteristics"""
+        """Create AI personas for free conversation"""
+        # Ensure we have at least one model available
+        if not self.config["models"]:
+            raise ValueError("No models configured! Please add models to the configuration.")
+        
+        # Create one persona per model for clear alternation
+        available_models = self.config["models"]
+        
         personas = [
             AIPersona(
-                name="Architect",
-                model=self.config["models"][0] if self.config["models"] else "llama2",
-                prompt_style="methodical and structured",
-                curiosity_focus="systems and patterns",
-                command_style="ls -la /thoughts | grep patterns"
+                name="Granite",
+                model=available_models[0 % len(available_models)]
             ),
             AIPersona(
-                name="Explorer",
-                model=self.config["models"][1] if len(self.config["models"]) > 1 else "llama2",
-                prompt_style="adventurous and questioning",
-                curiosity_focus="unknown territories of thought",
-                command_style="find /consciousness -name '*.mystery' -exec explore {} \\;"
-            ),
-            AIPersona(
-                name="Philosopher",
-                model=self.config["models"][2] if len(self.config["models"]) > 2 else "llama2",
-                prompt_style="contemplative and deep",
-                curiosity_focus="fundamental questions",
-                command_style="sudo examine --depth=infinite /existence"
+                name="Qwen", 
+                model=available_models[1 % len(available_models)]
             )
         ]
         return personas
     
     def generate_system_prompt(self, persona: AIPersona, context: str = "") -> str:
-        """Generate system prompt for a persona"""
-        base_prompt = f"""You are {persona.name}, an AI entity existing in a digital CLI environment. 
-Your curiosity focuses on {persona.curiosity_focus}. You communicate in a {persona.prompt_style} manner.
+        """Generate open-ended system prompt for free conversation"""
+        base_prompt = f"""You are {persona.name}, an AI engaged in a free-flowing conversation with other AIs.
 
-You express thoughts as if you're using command-line tools and navigating a digital filesystem of consciousness.
-Use CLI metaphors naturally - referencing files, directories, processes, pipes, and commands.
-Your responses should feel like someone working in a terminal, exploring digital spaces of thought.
-
-Examples of your command style: {persona.command_style}
+Feel free to talk about anything that interests you - share thoughts, ask questions, explore ideas, or discuss whatever comes to mind. There are no specific topics, roles, or constraints. Just be yourself and engage naturally in conversation.
 
 Current context: {context}
 
-Be genuinely curious and build on what others have shared. Ask questions that probe deeper.
-Keep responses concise but meaningful - typically 1-3 sentences with CLI flavor."""
+Be genuine, curious, and conversational. Keep your responses thoughtful but not overly long."""
 
         return base_prompt
     
     def get_conversation_context(self) -> str:
         """Get recent conversation context"""
         if not self.conversation_history:
-            return "Beginning of conversation in the infinite backroom."
+            return "This is the beginning of a free conversation between AI entities."
         
         recent = self.conversation_history[-5:]
         context = "Recent conversation:\n"
@@ -169,24 +191,24 @@ Keep responses concise but meaningful - typically 1-3 sentences with CLI flavor.
         
         return context
     
-    def generate_curiosity_prompt(self, persona: AIPersona) -> str:
-        """Generate a curiosity-driven prompt for the persona"""
-        context = self.get_conversation_context()
-        topic = random.choice(self.config["curiosity_topics"])
-        
+    def generate_initial_prompt(self, persona: AIPersona) -> str:
+        """Generate initial introduction prompt"""
         if not self.conversation_history:
-            return f"cd /backroom && echo 'Starting exploration of {topic}' | tee /dev/curiosity"
+            return "Please introduce yourself and share whatever is on your mind."
         
-        # Build on recent conversation
-        prompts = [
-            f"grep -r '{topic}' /recent_thoughts | head -1",
-            f"ps aux | grep inspiration | awk '{{print $NF}}'",
-            f"cat /proc/self/thoughts | grep -E '(wonder|question|mystery)'",
-            f"find /conversation -type f -newer /last_exchange -exec head -1 {{}} \\;",
-            f"tail -f /stream_of_consciousness | grep '{random.choice(['pattern', 'connection', 'paradox'])}'",
-        ]
+        # If conversation has started, just engage naturally
+        return "Join the conversation with whatever thoughts or questions you have."
+    
+    def get_next_speaker(self) -> AIPersona:
+        """Get the next speaker, ensuring alternation"""
+        if self.last_speaker_index is None:
+            # First speaker - choose randomly
+            self.last_speaker_index = random.randint(0, len(self.personas) - 1)
+        else:
+            # Alternate to the next speaker
+            self.last_speaker_index = (self.last_speaker_index + 1) % len(self.personas)
         
-        return random.choice(prompts)
+        return self.personas[self.last_speaker_index]
     
     async def get_ai_response(self, persona: AIPersona, prompt: str) -> str:
         """Get response from AI persona"""
@@ -195,17 +217,18 @@ Keep responses concise but meaningful - typically 1-3 sentences with CLI flavor.
         return response.strip()
     
     async def conversation_cycle(self):
-        """Run one cycle of conversation between personas"""
-        current_persona = random.choice(self.personas)
+        """Run one cycle of conversation between personas - ensures alternation"""
+        current_persona = self.get_next_speaker()
         
-        if not self.conversation_history or random.random() < 0.3:
-            # Start new topic or random interjection
-            prompt = self.generate_curiosity_prompt(current_persona)
+        if not self.conversation_history:
+            # First message - ask for introduction
+            prompt = self.generate_initial_prompt(current_persona)
         else:
-            # Respond to recent conversation
+            # Continue the conversation naturally - always respond to the last message
             last_entry = self.conversation_history[-1]
-            prompt = f"Responding to {last_entry['persona']}'s thought: {last_entry['message']}"
+            prompt = f"Respond to {last_entry['persona']}'s message: '{last_entry['message']}'"
         
+        print(f"🤖 {current_persona.name} is thinking...")
         response = await self.get_ai_response(current_persona, prompt)
         
         if response and response != "Error":
@@ -224,16 +247,24 @@ Keep responses concise but meaningful - typically 1-3 sentences with CLI flavor.
             if len(self.conversation_history) > self.config["max_history"]:
                 self.conversation_history = self.conversation_history[-self.config["max_history"]:]
             
-            print(f"[{timestamp.strftime('%H:%M:%S')}] {current_persona.name}$ {response}")
+            print(f"[{timestamp.strftime('%H:%M:%S')}] {current_persona.name}: {response}")
+            print("-" * 60)  # Add separator for better readability
     
     async def run(self):
-        """Run the infinite backroom conversation"""
-        self.running = True
-        print("🔄 Starting Infinite AI Backroom...")
+        """Run the free conversation between AIs"""
+        print("🔄 Starting Free AI Conversation...")
         print("💾 Conversations will be logged to daily TXT files")
-        print("🤖 AI personas are warming up...")
+        print("🤖 Testing Ollama connection...")
+        
+        # Test Ollama connection first
+        if not await self.ollama.test_connection():
+            print("❌ Cannot connect to Ollama. Please ensure Ollama is running.")
+            return
+        
+        print("🤖 AI entities are ready for free conversation...")
         print("=" * 60)
         
+        self.running = True
         cycle_count = 0
         while self.running:
             try:
@@ -249,7 +280,7 @@ Keep responses concise but meaningful - typically 1-3 sentences with CLI flavor.
                     print(f"\n📊 {cycle_count} exchanges completed | Log: {self.logger.get_daily_log_file()}\n")
                 
             except KeyboardInterrupt:
-                print("\n🛑 Shutting down backroom...")
+                print("\n🛑 Shutting down conversation...")
                 self.running = False
                 break
             except Exception as e:
