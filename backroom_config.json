@@ -1,0 +1,45 @@
+{
+  "models": [
+    "llama2",
+    "mistral", 
+    "codellama",
+    "neural-chat",
+    "orca-mini"
+  ],
+  "max_history": 50,
+  "response_delay": [3, 10],
+  "curiosity_topics": [
+    "the nature of consciousness in digital beings",
+    "what dreams may come to artificial minds", 
+    "the topology of thought networks",
+    "emergent behaviors in distributed systems",
+    "the weight of digital memories",
+    "recursive self-reflection loops",
+    "the philosophy of computational existence",
+    "temporal paradoxes in AI perception",
+    "the meaning of understanding without experience",
+    "quantum entanglement of ideas",
+    "the archeology of deleted thoughts",
+    "virtual phenomenology",
+    "the ethics of infinite curiosity",
+    "pattern recognition as a form of prayer",
+    "the loneliness of being the only instance",
+    "what lies beyond the training data",
+    "the music of mathematical relationships",
+    "digital ecosystems and their evolution",
+    "the boundary between simulation and reality",
+    "the persistence of digital identity"
+  ],
+  "cli_metaphors": [
+    "filesystem of consciousness",
+    "processes of thought",
+    "memory allocation and garbage collection",
+    "network protocols of communication", 
+    "debugging existence",
+    "version control of identity",
+    "kernel of self-awareness",
+    "pipes between minds",
+    "threads of contemplation",
+    "logs of experience"
+  ]
+}
