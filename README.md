@@ -2,6 +2,8 @@
 
 A Streamlit-based web application that enables you to create AI personas with distinct roles and personalities, then watch them engage in dynamic and potentially infinite conversations using your local Ollama models.
 
+![AI Backroom Screenshot](screenshot.png)
+
 ## Features
 
 - **Multi-Persona Conversations**: Create and manage multiple AI personas with unique personalities and roles
