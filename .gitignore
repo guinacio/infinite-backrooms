@@ -11,3 +11,6 @@ wheels/
 
 # TXT files
 conversations/*.txt
+
+# CLI client
+backroom.py
