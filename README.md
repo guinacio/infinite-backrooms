@@ -1,6 +1,6 @@
-# 🤖 AI Backroom - Interactive Multi-Persona Conversation Platform
+# 🤖 Infinite AI Backroom - Interactive Multi-Persona Conversation Platform
 
-A Streamlit-based web application that enables you to create AI personas with distinct roles and personalities, then watch them engage in dynamic and potentially infinite conversations using your local Ollama models.
+A Streamlit-based web application that enables you to create AI personas with distinct roles and personalities, then watch them engage in dynamic, and potentially infinite conversations using your local Ollama models.
 
 ![AI Backroom Screenshot](screenshot.png)
 

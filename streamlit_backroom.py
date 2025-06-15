@@ -92,12 +92,13 @@ class OllamaClient:
             st.error(f"Failed to connect to Ollama: {e}")
             return False, []
     
-    async def generate_stream(self, model: str, prompt: str, system: str = None) -> AsyncGenerator[str, None]:
-        """Generate streaming response from Ollama model"""
+    async def generate_stream(self, model: str, prompt: str, system: str = None, think: bool = True) -> AsyncGenerator[Dict[str, str], None]:
+        """Generate streaming response from Ollama model with optional thinking"""
         payload = {
             "model": model,
             "prompt": prompt,
-            "stream": True
+            "stream": True,
+            "think": think
         }
         
         if system and system.strip():
@@ -115,18 +116,42 @@ class OllamaClient:
                             if line:
                                 try:
                                     chunk = json.loads(line.decode('utf-8'))
+                                    
+                                    # Yield thinking content if available
+                                    if 'thinking' in chunk and chunk['thinking']:
+                                        yield {"type": "thinking", "content": chunk['thinking']}
+                                    
+                                    # Yield response content if available
                                     if 'response' in chunk and chunk['response']:
-                                        yield chunk['response']
+                                        yield {"type": "response", "content": chunk['response']}
+                                    
                                     if chunk.get('done', False):
                                         break
                                 except json.JSONDecodeError:
                                     continue
+                    elif response.status == 400 and think:
+                        # Check if the error is about thinking not being supported
+                        error_text = await response.text()
+                        if "does not support thinking" in error_text:
+                            # Add model to non-thinking cache for future requests
+                            import streamlit as st
+                            st.session_state.non_thinking_models.add(model)
+                            
+                            # Retry without thinking
+                            yield {"type": "info", "content": f"Model {model} doesn't support thinking - switching to standard mode for future requests"}
+                            
+                            # Recursive call without thinking
+                            async for chunk in self.generate_stream(model, prompt, system, think=False):
+                                yield chunk
+                            return
+                        else:
+                            yield {"type": "error", "content": f"Error {response.status}: {error_text}"}
                     else:
-                        yield f"Error {response.status}: {await response.text()}"
+                        yield {"type": "error", "content": f"Error {response.status}: {await response.text()}"}
         except asyncio.TimeoutError:
-            yield "Error: Request timeout"
+            yield {"type": "error", "content": "Error: Request timeout"}
         except Exception as e:
-            yield f"Error: {str(e)}"
+            yield {"type": "error", "content": f"Error: {str(e)}"}
 
 
 class StreamlitBackroomApp:
@@ -179,10 +204,15 @@ class StreamlitBackroomApp:
                 'response_delay_min': 2,
                 'response_delay_max': 8,
                 'auto_advance': True,
-                'context_messages': 10
+                'context_messages': 10,
+                'enable_thinking': True
             }
         if 'auto_run_count' not in st.session_state:
             st.session_state.auto_run_count = 0
+        if 'total_message_count' not in st.session_state:
+            st.session_state.total_message_count = 0
+        if 'non_thinking_models' not in st.session_state:
+            st.session_state.non_thinking_models = set()
     
     async def check_ollama_connection(self):
         """Check Ollama connection and update available models"""
@@ -459,13 +489,26 @@ class StreamlitBackroomApp:
             auto_advance = st.checkbox("Auto-advance conversation", 
                                      value=st.session_state.settings['auto_advance'])
             
+            enable_thinking = st.checkbox("Enable AI Thinking Display", 
+                                        value=st.session_state.settings['enable_thinking'],
+                                        help="Show the AI's reasoning process before responses. Requires compatible models like deepseek-r1.")
+            
+            # Show models that don't support thinking
+            if st.session_state.non_thinking_models:
+                st.info(f"🤖 **Models automatically using standard mode:** {', '.join(sorted(st.session_state.non_thinking_models))}")
+                if st.button("🔄 Reset Model Compatibility Cache", help="Clear the cache of models that don't support thinking"):
+                    st.session_state.non_thinking_models.clear()
+                    st.success("Model compatibility cache cleared!")
+                    st.rerun()
+            
             if st.form_submit_button("💾 Save Settings"):
                 st.session_state.settings.update({
                     'max_history': max_history,
                     'context_messages': context_messages,
                     'response_delay_min': delay_min,
                     'response_delay_max': delay_max,
-                    'auto_advance': auto_advance
+                    'auto_advance': auto_advance,
+                    'enable_thinking': enable_thinking
                 })
                 st.success("Settings saved!")
     
@@ -524,10 +567,16 @@ Be genuine, curious, and conversational. Keep your responses thoughtful but not 
         
         return base_prompt
     
-    async def get_ai_response_stream(self, persona: AIPersona, prompt: str) -> AsyncGenerator[str, None]:
-        """Get streaming response from AI persona"""
+    async def get_ai_response_stream(self, persona: AIPersona, prompt: str) -> AsyncGenerator[Dict[str, str], None]:
+        """Get streaming response from AI persona with optional thinking"""
         system_prompt = self.generate_system_prompt(persona)
-        async for chunk in self.ollama.generate_stream(persona.model, prompt, system_prompt):
+        enable_thinking = st.session_state.settings.get('enable_thinking', True)
+        
+        # Check if this model is known to not support thinking
+        if persona.model in st.session_state.non_thinking_models:
+            enable_thinking = False
+        
+        async for chunk in self.ollama.generate_stream(persona.model, prompt, system_prompt, think=enable_thinking):
             yield chunk
     
     def conversation_ui(self):
@@ -558,6 +607,7 @@ Be genuine, curious, and conversational. Keep your responses thoughtful but not 
         with col4:
             if st.button("🗑️ Clear History"):
                 st.session_state.messages = []
+                st.session_state.total_message_count = 0
                 st.session_state.last_speaker_index = None
                 st.rerun()
         
@@ -568,18 +618,33 @@ Be genuine, curious, and conversational. Keep your responses thoughtful but not 
         
         # Chat input for manual messages (optional feature)
         if prompt := st.chat_input("Add a message to the conversation (optional)"):
+            timestamp = datetime.now()
             # Add user message to conversation
             st.session_state.messages.append({
                 "role": "user",
                 "content": prompt,
-                "timestamp": datetime.now(),
+                "timestamp": timestamp,
                 "persona_name": "User",
                 "model": "Human"
             })
+            # Increment total message counter
+            st.session_state.total_message_count += 1
+            
+            # Log user message to file
+            self.logger.log_message("User", prompt, timestamp)
+            
             st.rerun()
         
-        # Display all messages using st.chat_message
-        for message in st.session_state.messages:
+        # Use the same limit as max_history setting for both display and storage
+        display_limit = st.session_state.settings['max_history']
+        messages_to_display = st.session_state.messages
+        
+        # Show info about message limit
+        if st.session_state.total_message_count > display_limit:
+            st.info(f"📜 Showing last {display_limit} of {st.session_state.total_message_count} total messages (limited for performance). Full conversation history is available in **Export & Logs** tab.")
+        
+        # Display messages using st.chat_message
+        for message in messages_to_display:
             if message["role"] == "user":
                 with st.chat_message("user"):
                     st.write(message["content"])
@@ -628,6 +693,15 @@ Be genuine, curious, and conversational. Keep your responses thoughtful but not 
                     
                     st.markdown(persona_display, unsafe_allow_html=True)
                     
+                    # Show thinking if available (before the message)
+                    if "thinking" in message and message["thinking"] and message["thinking"].strip():
+                        with st.expander("🧠 AI's Thinking Process", expanded=False):
+                            st.code(
+                                message["thinking"], 
+                                language="text",
+                                wrap_lines=True
+                            )
+                    
                     # Show message content with @mention highlighting
                     content = message["content"]
                     
@@ -664,16 +738,16 @@ Be genuine, curious, and conversational. Keep your responses thoughtful but not 
                 st.write(f"⏳ Waiting {delay:.1f} seconds...")
                 time.sleep(delay)
                 
-                # Run the next turn automatically
-                self.run_single_turn(auto_mode=True)
+                # Run the next turn automatically with thinking display
+                self.run_single_turn(auto_mode=True, status_container=status)
                 
                 status.update(label="Turn completed", state="complete", expanded=False)
             
             # Continue the auto-run cycle
             st.rerun()
     
-    def run_single_turn(self, auto_mode=False):
-        """Run a single conversation turn with streaming response"""
+    def run_single_turn(self, auto_mode=False, status_container=None):
+        """Run a single conversation turn with streaming response and thinking display"""
         current_persona = self.get_next_speaker()
         if not current_persona:
             st.error("No enabled personas available")
@@ -750,22 +824,84 @@ Your response should be conversational and engaging."""
             
             st.markdown(persona_display, unsafe_allow_html=True)
             
-            # Show thinking indicator and stream the response
-            thinking_placeholder = st.empty()
-            thinking_placeholder.write("💭 _Thinking..._")
-            
-            # Get streaming response
+            # Get streaming response with thinking
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            
+            thinking_content = ""
+            response_content = ""
+            
             try:
-                async def get_response():
+                async def process_stream():
+                    nonlocal thinking_content, response_content
+                    thinking_placeholder = None
+                    thinking_stream_placeholder = None
+                    response_placeholder = None
+                    
                     async for chunk in self.get_ai_response_stream(current_persona, prompt):
-                        if not chunk.startswith("Error"):
-                            yield chunk
+                        if chunk["type"] == "error":
+                            if thinking_placeholder:
+                                thinking_placeholder.empty()
+                            st.error(chunk["content"])
+                            return
+                        
+                        elif chunk["type"] == "info":
+                            # Show info message (like fallback to non-thinking mode)
+                            if auto_mode and status_container:
+                                with status_container:
+                                    st.info(chunk["content"])
+                            else:
+                                st.info(chunk["content"])
+                        
+                        elif chunk["type"] == "thinking":
+                            thinking_content += chunk["content"]
+                            
+                            # Display thinking in status container if in auto mode
+                            if auto_mode and status_container:
+                                if thinking_stream_placeholder is None:
+                                    with status_container:
+                                        st.write("🧠 **AI is thinking...**")
+                                        thinking_stream_placeholder = st.empty()
+                                
+                                with thinking_stream_placeholder:
+                                    # Show partial thinking content
+                                    truncated_thinking = thinking_content
+                                    if len(thinking_content) > 200:
+                                        truncated_thinking = thinking_content[:200] + "..."
+                                    st.text(f"💭 {truncated_thinking}")
+                            
+                            # For manual mode, show thinking indicator
+                            elif not auto_mode:
+                                if thinking_placeholder is None:
+                                    thinking_placeholder = st.empty()
+                                thinking_placeholder.write("🧠 _AI is thinking deeply..._")
+                        
+                        elif chunk["type"] == "response":
+                            response_content += chunk["content"]
+                            
+                            # Clear thinking indicator for manual mode
+                            if thinking_placeholder:
+                                thinking_placeholder.empty()
+                                thinking_placeholder = None
+                            
+                            # For manual mode, start streaming response immediately
+                            if not auto_mode:
+                                if response_placeholder is None:
+                                    response_placeholder = st.empty()
+                                response_placeholder.write(response_content)
                 
-                # Clear thinking indicator and stream the response
-                thinking_placeholder.empty()
-                response_text = st.write_stream(get_response())
+                # Run the async processing
+                loop.run_until_complete(process_stream())
+                
+                # For auto mode, stream the final response after thinking is complete
+                if auto_mode:
+                    async def stream_response():
+                        for char in response_content:
+                            yield char
+                    
+                    response_text = st.write_stream(stream_response())
+                else:
+                    response_text = response_content
                 
             finally:
                 loop.close()
@@ -774,18 +910,23 @@ Your response should be conversational and engaging."""
             timestamp = datetime.now()
             st.caption(f"🕒 {timestamp.strftime('%H:%M:%S')} • 🤖 {current_persona.model}")
         
-        # Add response to conversation history
-        if response_text and not response_text.startswith("Error"):
+        # Add response to conversation history (using response_content not response_text)
+        final_response = response_content if response_content else response_text
+        if final_response and not final_response.startswith("Error"):
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": response_text,
+                "content": final_response,
                 "timestamp": timestamp,
                 "persona_name": current_persona.name,
-                "model": current_persona.model
+                "model": current_persona.model,
+                "thinking": thinking_content  # Store thinking for potential future use
             })
             
-            # Log to file
-            self.logger.log_message(current_persona.name, response_text, timestamp)
+            # Increment total message counter
+            st.session_state.total_message_count += 1
+            
+            # Log to file (only the final response, not the thinking)
+            self.logger.log_message(current_persona.name, final_response, timestamp)
             
             # Keep history manageable
             max_history = st.session_state.settings['max_history']
@@ -869,7 +1010,18 @@ Your response should be conversational and engaging."""
             else:
                 st.error("❌ Ollama Disconnected")
                 if st.button("🔄 Retry Connection", type="secondary"):
-                    st.rerun()
+                    with st.spinner("Connecting to Ollama..."):
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            connected = loop.run_until_complete(self.check_ollama_connection())
+                            if connected:
+                                st.success(f"✅ Connected! Found {len(st.session_state.available_models)} models")
+                                st.rerun()
+                            else:
+                                st.error("❌ Still unable to connect to Ollama")
+                        finally:
+                            loop.close()
 
             st.divider()
             st.subheader("📊 Status")
@@ -877,7 +1029,7 @@ Your response should be conversational and engaging."""
             with col1:
                 st.metric(label="Personas", value=len(st.session_state.personas))
             with col2:
-                st.metric(label="Messages", value=len(st.session_state.messages))
+                st.metric(label="Messages", value=st.session_state.total_message_count)
 
             if st.session_state.is_running:
                 st.success("🔄 Conversation Running")
@@ -931,6 +1083,10 @@ Your response should be conversational and engaging."""
             st.markdown("• Personas rotate automatically")
             st.markdown("• AIs can use **@mentions** to address each other")
             st.markdown(f"• Each AI sees the last **{st.session_state.settings['context_messages']}** messages")
+            
+            if st.session_state.settings.get('enable_thinking', True):
+                st.markdown("• 🧠 **Thinking enabled** - View AI reasoning in expanders")
+                st.markdown("• Works best with **deepseek-r1** and compatible models")
 
     def run(self):
         """Main Streamlit app interface"""
