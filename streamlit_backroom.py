@@ -493,14 +493,6 @@ class StreamlitBackroomApp:
                                         value=st.session_state.settings['enable_thinking'],
                                         help="Show the AI's reasoning process before responses. Requires compatible models like deepseek-r1.")
             
-            # Show models that don't support thinking
-            if st.session_state.non_thinking_models:
-                st.info(f"🤖 **Models automatically using standard mode:** {', '.join(sorted(st.session_state.non_thinking_models))}")
-                if st.button("🔄 Reset Model Compatibility Cache", help="Clear the cache of models that don't support thinking"):
-                    st.session_state.non_thinking_models.clear()
-                    st.success("Model compatibility cache cleared!")
-                    st.rerun()
-            
             if st.form_submit_button("💾 Save Settings"):
                 st.session_state.settings.update({
                     'max_history': max_history,
@@ -511,6 +503,14 @@ class StreamlitBackroomApp:
                     'enable_thinking': enable_thinking
                 })
                 st.success("Settings saved!")
+            
+        # Show models that don't support thinking
+        if st.session_state.non_thinking_models:
+            st.info(f"🤖 **Models automatically using standard mode:** {', '.join(sorted(st.session_state.non_thinking_models))}")
+            if st.button("🔄 Reset Model Compatibility Cache", help="Clear the cache of models that don't support thinking"):
+                st.session_state.non_thinking_models.clear()
+                st.success("Model compatibility cache cleared!")
+                st.rerun()
     
     def get_next_speaker(self) -> Optional[AIPersona]:
         """Get the next speaker in rotation"""
