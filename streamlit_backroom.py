@@ -213,6 +213,8 @@ class StreamlitBackroomApp:
             st.session_state.total_message_count = 0
         if 'non_thinking_models' not in st.session_state:
             st.session_state.non_thinking_models = set()
+        if 'pending_manual_turn' not in st.session_state:
+            st.session_state.pending_manual_turn = False
     
     async def check_ollama_connection(self):
         """Check Ollama connection and update available models"""
@@ -602,7 +604,8 @@ Be genuine, curious, and conversational. Keep your responses thoughtful but not 
         
         with col3:
             if st.button("🔄 Next Turn", disabled=st.session_state.is_running):
-                self.run_single_turn()
+                st.session_state.pending_manual_turn = True
+                st.rerun()
         
         with col4:
             if st.button("🗑️ Clear History"):
@@ -610,7 +613,13 @@ Be genuine, curious, and conversational. Keep your responses thoughtful but not 
                 st.session_state.total_message_count = 0
                 st.session_state.last_speaker_index = None
                 st.rerun()
-        
+
+        # Handle manual turn if pending
+        if st.session_state.pending_manual_turn:
+            st.session_state.pending_manual_turn = False
+            self.run_single_turn(auto_mode=False)
+            st.rerun()
+
         st.divider()
 
         # Display conversation using native chat elements
@@ -869,9 +878,8 @@ Your response should be conversational and engaging."""
                             
                             # For manual mode, show thinking indicator
                             elif not auto_mode:
-                                if thinking_placeholder is None:
-                                    thinking_placeholder = st.empty()
-                                thinking_placeholder.write("🧠 _AI is thinking deeply..._")
+                                thinking_placeholder.write("🧠 **AI is thinking...**")
+                                st.text(f"💭 {thinking_content}")
                         
                         elif chunk["type"] == "response":
                             response_content += chunk["content"]
