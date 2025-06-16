@@ -864,11 +864,8 @@ Your response should be conversational and engaging."""
                                         thinking_stream_placeholder = st.empty()
                                 
                                 with thinking_stream_placeholder:
-                                    # Show partial thinking content
-                                    truncated_thinking = thinking_content
-                                    if len(thinking_content) > 200:
-                                        truncated_thinking = thinking_content[:200] + "..."
-                                    st.text(f"💭 {truncated_thinking}")
+                                    # Show thinking content
+                                    st.text(f"💭 {thinking_content}")
                             
                             # For manual mode, show thinking indicator
                             elif not auto_mode:
@@ -884,24 +881,14 @@ Your response should be conversational and engaging."""
                                 thinking_placeholder.empty()
                                 thinking_placeholder = None
                             
-                            # For manual mode, start streaming response immediately
-                            if not auto_mode:
-                                if response_placeholder is None:
-                                    response_placeholder = st.empty()
-                                response_placeholder.write(response_content)
+                            if response_placeholder is None:
+                                response_placeholder = st.empty()
+                                
+                            response_placeholder.write(response_content)
+
                 
                 # Run the async processing
                 loop.run_until_complete(process_stream())
-                
-                # For auto mode, stream the final response after thinking is complete
-                if auto_mode:
-                    async def stream_response():
-                        for char in response_content:
-                            yield char
-                    
-                    response_text = st.write_stream(stream_response())
-                else:
-                    response_text = response_content
                 
             finally:
                 loop.close()
@@ -911,7 +898,7 @@ Your response should be conversational and engaging."""
             st.caption(f"🕒 {timestamp.strftime('%H:%M:%S')} • 🤖 {current_persona.model}")
         
         # Add response to conversation history (using response_content not response_text)
-        final_response = response_content if response_content else response_text
+        final_response = response_content.strip()
         if final_response and not final_response.startswith("Error"):
             st.session_state.messages.append({
                 "role": "assistant",
