@@ -878,18 +878,19 @@ Your response should be conversational and engaging."""
                             
                             # For manual mode, show thinking indicator
                             elif not auto_mode:
-                                thinking_placeholder.write("🧠 **AI is thinking...**")
-                                st.text(f"💭 {thinking_content}")
+                                if not thinking_placeholder:
+                                    st.write("🧠 **AI is thinking...**")
+                                    thinking_placeholder = st.empty()
+                                
+                                with thinking_placeholder:
+                                    st.text(f"💭 {thinking_content}")
                         
                         elif chunk["type"] == "response":
                             response_content += chunk["content"]
                             
-                            # Clear thinking indicator for manual mode
-                            if thinking_placeholder:
-                                thinking_placeholder.empty()
-                                thinking_placeholder = None
-                            
                             if response_placeholder is None:
+                                if not auto_mode:
+                                    st.write("💬 **AI is responding...**")
                                 response_placeholder = st.empty()
                                 
                             response_placeholder.write(response_content)
