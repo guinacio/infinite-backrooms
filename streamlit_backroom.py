@@ -10,6 +10,7 @@ import os
 import random
 import time
 import re
+import warnings
 from datetime import datetime
 from typing import List, Dict, Any, Optional, AsyncGenerator
 import aiohttp
@@ -19,6 +20,11 @@ import streamlit as st
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import uuid
+
+# Suppress specific warnings related to async cleanup during Streamlit reruns
+warnings.filterwarnings("ignore", message="Task was destroyed but it is pending!")
+warnings.filterwarnings("ignore", message="Unclosed client session")
+warnings.filterwarnings("ignore", message="Event loop is closed")
 
 
 @dataclass
@@ -106,52 +112,68 @@ class OllamaClient:
         
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.base_url}/api/generate",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as response:
-                    if response.status == 200:
-                        async for line in response.content:
-                            if line:
-                                try:
-                                    chunk = json.loads(line.decode('utf-8'))
-                                    
-                                    # Yield thinking content if available
-                                    if 'thinking' in chunk and chunk['thinking']:
-                                        yield {"type": "thinking", "content": chunk['thinking']}
-                                    
-                                    # Yield response content if available
-                                    if 'response' in chunk and chunk['response']:
-                                        yield {"type": "response", "content": chunk['response']}
-                                    
-                                    if chunk.get('done', False):
-                                        break
-                                except json.JSONDecodeError:
-                                    continue
-                    elif response.status == 400 and think:
-                        # Check if the error is about thinking not being supported
-                        error_text = await response.text()
-                        if "does not support thinking" in error_text:
-                            # Add model to non-thinking cache for future requests
-                            import streamlit as st
-                            st.session_state.non_thinking_models.add(model)
-                            
-                            # Retry without thinking
-                            yield {"type": "info", "content": f"Model {model} doesn't support thinking - switching to standard mode for future requests"}
-                            
-                            # Recursive call without thinking
-                            async for chunk in self.generate_stream(model, prompt, system, think=False, timeout=timeout):
-                                yield chunk
-                            return
+                try:
+                    async with session.post(
+                        f"{self.base_url}/api/generate",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=timeout)
+                    ) as response:
+                        if response.status == 200:
+                            try:
+                                async for line in response.content:
+                                    if line:
+                                        try:
+                                            chunk = json.loads(line.decode('utf-8'))
+                                            
+                                            # Yield thinking content if available
+                                            if 'thinking' in chunk and chunk['thinking']:
+                                                yield {"type": "thinking", "content": chunk['thinking']}
+                                            
+                                            # Yield response content if available
+                                            if 'response' in chunk and chunk['response']:
+                                                yield {"type": "response", "content": chunk['response']}
+                                            
+                                            if chunk.get('done', False):
+                                                break
+                                        except json.JSONDecodeError:
+                                            continue
+                            except asyncio.CancelledError:
+                                # Handle graceful cancellation (e.g., when user pauses)
+                                yield {"type": "info", "content": "Response cancelled by user"}
+                                return
+                        elif response.status == 400 and think:
+                            # Check if the error is about thinking not being supported
+                            error_text = await response.text()
+                            if "does not support thinking" in error_text:
+                                # Add model to non-thinking cache for future requests
+                                import streamlit as st
+                                st.session_state.non_thinking_models.add(model)
+                                
+                                # Retry without thinking
+                                yield {"type": "info", "content": f"Model {model} doesn't support thinking - switching to standard mode for future requests"}
+                                
+                                # Recursive call without thinking
+                                async for chunk in self.generate_stream(model, prompt, system, think=False, timeout=timeout):
+                                    yield chunk
+                                return
+                            else:
+                                yield {"type": "error", "content": f"Error {response.status}: {error_text}"}
                         else:
+                            error_text = await response.text()
                             yield {"type": "error", "content": f"Error {response.status}: {error_text}"}
-                    else:
-                        yield {"type": "error", "content": f"Error {response.status}: {await response.text()}"}
-        except asyncio.TimeoutError:
-            yield {"type": "error", "content": "Error: Request timeout"}
+                except asyncio.CancelledError:
+                    # Handle cancellation at the request level
+                    yield {"type": "info", "content": "Request cancelled"}
+                    return
+                except asyncio.TimeoutError:
+                    yield {"type": "error", "content": "Error: Request timeout"}
+                except Exception as e:
+                    yield {"type": "error", "content": f"Error: {str(e)}"}
+        except asyncio.CancelledError:
+            # Handle cancellation at the session level - don't yield anything, just return
+            return
         except Exception as e:
-            yield {"type": "error", "content": f"Error: {str(e)}"}
+            yield {"type": "error", "content": f"Connection error: {str(e)}"}
 
 
 class StreamlitBackroomApp:
@@ -477,7 +499,7 @@ class StreamlitBackroomApp:
             max_history = st.number_input("Max History Messages", min_value=10, max_value=200, 
                                         value=st.session_state.settings['max_history'])
             
-            context_messages = st.number_input("Context Messages (sent to AI)", min_value=5, max_value=25, 
+            context_messages = st.number_input("Context Messages (sent to AI)", min_value=1, max_value=25, 
                                              value=st.session_state.settings['context_messages'],
                                              help="Number of recent messages to include as context for each AI response")
             
@@ -846,6 +868,7 @@ Your response should be conversational and engaging."""
             
             thinking_content = ""
             response_content = ""
+            task = None
             
             try:
                 async def process_stream():
@@ -854,60 +877,96 @@ Your response should be conversational and engaging."""
                     thinking_stream_placeholder = None
                     response_placeholder = None
                     
-                    async for chunk in self.get_ai_response_stream(current_persona, prompt):
-                        if chunk["type"] == "error":
-                            if thinking_placeholder:
-                                thinking_placeholder.empty()
-                            st.error(chunk["content"])
-                            return
-                        
-                        elif chunk["type"] == "info":
-                            # Show info message (like fallback to non-thinking mode)
-                            if auto_mode and status_container:
-                                with status_container:
-                                    st.info(chunk["content"])
-                            else:
-                                st.info(chunk["content"])
-                        
-                        elif chunk["type"] == "thinking":
-                            thinking_content += chunk["content"]
+                    try:
+                        async for chunk in self.get_ai_response_stream(current_persona, prompt):
+                            if chunk["type"] == "error":
+                                if thinking_placeholder:
+                                    thinking_placeholder.empty()
+                                st.error(chunk["content"])
+                                return
                             
-                            # Display thinking in status container if in auto mode
-                            if auto_mode and status_container:
-                                if thinking_stream_placeholder is None:
+                            elif chunk["type"] == "info":
+                                # Show info message (like fallback to non-thinking mode or cancellation)
+                                if auto_mode and status_container:
                                     with status_container:
+                                        st.info(chunk["content"])
+                                else:
+                                    st.info(chunk["content"])
+                            
+                            elif chunk["type"] == "thinking":
+                                thinking_content += chunk["content"]
+                                
+                                # Display thinking in status container if in auto mode
+                                if auto_mode and status_container:
+                                    if thinking_stream_placeholder is None:
+                                        with status_container:
+                                            st.write("🧠 **AI is thinking...**")
+                                            thinking_stream_placeholder = st.empty()
+                                    
+                                    with thinking_stream_placeholder:
+                                        # Show thinking content
+                                        st.text(f"💭 {thinking_content}")
+                                
+                                # For manual mode, show thinking indicator
+                                elif not auto_mode:
+                                    if not thinking_placeholder:
                                         st.write("🧠 **AI is thinking...**")
-                                        thinking_stream_placeholder = st.empty()
-                                
-                                with thinking_stream_placeholder:
-                                    # Show thinking content
-                                    st.text(f"💭 {thinking_content}")
+                                        thinking_placeholder = st.empty()
+                                    
+                                    with thinking_placeholder:
+                                        st.text(f"💭 {thinking_content}")
                             
-                            # For manual mode, show thinking indicator
-                            elif not auto_mode:
-                                if not thinking_placeholder:
-                                    st.write("🧠 **AI is thinking...**")
-                                    thinking_placeholder = st.empty()
+                            elif chunk["type"] == "response":
+                                response_content += chunk["content"]
                                 
-                                with thinking_placeholder:
-                                    st.text(f"💭 {thinking_content}")
-                        
-                        elif chunk["type"] == "response":
-                            response_content += chunk["content"]
-                            
-                            if response_placeholder is None:
-                                if not auto_mode:
-                                    st.write("💬 **AI is responding...**")
-                                response_placeholder = st.empty()
-                                
-                            response_placeholder.write(response_content)
+                                if response_placeholder is None:
+                                    if not auto_mode:
+                                        st.write("💬 **AI is responding...**")
+                                    response_placeholder = st.empty()
+                                    
+                                response_placeholder.write(response_content)
 
+                    except asyncio.CancelledError:
+                        # Handle graceful cancellation
+                        if auto_mode and status_container:
+                            with status_container:
+                                st.info("🛑 Response cancelled")
+                        else:
+                            st.info("🛑 Response cancelled")
+                        return
+                    except Exception as e:
+                        st.error(f"Stream processing error: {str(e)}")
+                        return
+
+                # Create and run the task
+                task = loop.create_task(process_stream())
+                loop.run_until_complete(task)
                 
-                # Run the async processing
-                loop.run_until_complete(process_stream())
-                
+            except KeyboardInterrupt:
+                # Handle Ctrl+C or other interruptions
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        loop.run_until_complete(task)
+                    except asyncio.CancelledError:
+                        pass
+            except Exception as e:
+                # Handle any other exceptions
+                st.error(f"Processing error: {str(e)}")
             finally:
-                loop.close()
+                # Clean up any remaining tasks
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        loop.run_until_complete(task)
+                    except asyncio.CancelledError:
+                        pass
+                # Properly close the event loop
+                try:
+                    loop.close()
+                except RuntimeError:
+                    # Loop may already be closed, ignore this error
+                    pass
             
             # Show timestamp and model
             timestamp = datetime.now()
