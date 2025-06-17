@@ -92,7 +92,7 @@ class OllamaClient:
             st.error(f"Failed to connect to Ollama: {e}")
             return False, []
     
-    async def generate_stream(self, model: str, prompt: str, system: str = None, think: bool = True) -> AsyncGenerator[Dict[str, str], None]:
+    async def generate_stream(self, model: str, prompt: str, system: str = None, think: bool = True, timeout: int = 300) -> AsyncGenerator[Dict[str, str], None]:
         """Generate streaming response from Ollama model with optional thinking"""
         payload = {
             "model": model,
@@ -109,7 +109,7 @@ class OllamaClient:
                 async with session.post(
                     f"{self.base_url}/api/generate",
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=180)
+                    timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response:
                     if response.status == 200:
                         async for line in response.content:
@@ -141,7 +141,7 @@ class OllamaClient:
                             yield {"type": "info", "content": f"Model {model} doesn't support thinking - switching to standard mode for future requests"}
                             
                             # Recursive call without thinking
-                            async for chunk in self.generate_stream(model, prompt, system, think=False):
+                            async for chunk in self.generate_stream(model, prompt, system, think=False, timeout=timeout):
                                 yield chunk
                             return
                         else:
@@ -205,7 +205,8 @@ class StreamlitBackroomApp:
                 'response_delay_max': 8,
                 'auto_advance': True,
                 'context_messages': 10,
-                'enable_thinking': True
+                'enable_thinking': True,
+                'response_timeout': 300  # 5 minutes default
             }
         if 'auto_run_count' not in st.session_state:
             st.session_state.auto_run_count = 0
@@ -480,6 +481,10 @@ class StreamlitBackroomApp:
                                              value=st.session_state.settings['context_messages'],
                                              help="Number of recent messages to include as context for each AI response")
             
+            response_timeout = st.number_input("Response Timeout (seconds)", min_value=30, max_value=600, 
+                                             value=st.session_state.settings['response_timeout'],
+                                             help="Maximum time to wait for AI response before timing out")
+            
             col1, col2 = st.columns(2)
             with col1:
                 delay_min = st.number_input("Min Response Delay (seconds)", min_value=1, max_value=30, 
@@ -499,6 +504,7 @@ class StreamlitBackroomApp:
                 st.session_state.settings.update({
                     'max_history': max_history,
                     'context_messages': context_messages,
+                    'response_timeout': response_timeout,
                     'response_delay_min': delay_min,
                     'response_delay_max': delay_max,
                     'auto_advance': auto_advance,
@@ -573,12 +579,13 @@ Be genuine, curious, and conversational. Keep your responses thoughtful but not 
         """Get streaming response from AI persona with optional thinking"""
         system_prompt = self.generate_system_prompt(persona)
         enable_thinking = st.session_state.settings.get('enable_thinking', True)
+        timeout_seconds = st.session_state.settings.get('response_timeout', 300)
         
         # Check if this model is known to not support thinking
         if persona.model in st.session_state.non_thinking_models:
             enable_thinking = False
         
-        async for chunk in self.ollama.generate_stream(persona.model, prompt, system_prompt, think=enable_thinking):
+        async for chunk in self.ollama.generate_stream(persona.model, prompt, system_prompt, think=enable_thinking, timeout=timeout_seconds):
             yield chunk
     
     def conversation_ui(self):
