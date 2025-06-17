@@ -21,10 +21,16 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import uuid
 
-# Suppress specific warnings related to async cleanup during Streamlit reruns
+# Suppress async cleanup warnings
 warnings.filterwarnings("ignore", message="Task was destroyed but it is pending!")
-warnings.filterwarnings("ignore", message="Unclosed client session")
+warnings.filterwarnings("ignore", message="Unclosed client session")  
 warnings.filterwarnings("ignore", message="Event loop is closed")
+warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*Event loop is closed.*")
+warnings.filterwarnings("ignore", category=ResourceWarning, message=".*unclosed.*client.*session.*")
+
+# Also suppress aiohttp specific warnings
+import logging
+logging.getLogger('aiohttp.client').setLevel(logging.ERROR)
 
 
 @dataclass
@@ -110,70 +116,90 @@ class OllamaClient:
         if system and system.strip():
             payload["system"] = system.strip()
         
+        session = None
         try:
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.post(
-                        f"{self.base_url}/api/generate",
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=timeout)
-                    ) as response:
-                        if response.status == 200:
-                            try:
-                                async for line in response.content:
-                                    if line:
-                                        try:
-                                            chunk = json.loads(line.decode('utf-8'))
-                                            
-                                            # Yield thinking content if available
-                                            if 'thinking' in chunk and chunk['thinking']:
-                                                yield {"type": "thinking", "content": chunk['thinking']}
-                                            
-                                            # Yield response content if available
-                                            if 'response' in chunk and chunk['response']:
-                                                yield {"type": "response", "content": chunk['response']}
-                                            
-                                            if chunk.get('done', False):
-                                                break
-                                        except json.JSONDecodeError:
-                                            continue
-                            except asyncio.CancelledError:
-                                # Handle graceful cancellation (e.g., when user pauses)
-                                yield {"type": "info", "content": "Response cancelled by user"}
-                                return
-                        elif response.status == 400 and think:
-                            # Check if the error is about thinking not being supported
-                            error_text = await response.text()
-                            if "does not support thinking" in error_text:
-                                # Add model to non-thinking cache for future requests
-                                import streamlit as st
-                                st.session_state.non_thinking_models.add(model)
-                                
-                                # Retry without thinking
-                                yield {"type": "info", "content": f"Model {model} doesn't support thinking - switching to standard mode for future requests"}
-                                
-                                # Recursive call without thinking
-                                async for chunk in self.generate_stream(model, prompt, system, think=False, timeout=timeout):
-                                    yield chunk
-                                return
-                            else:
-                                yield {"type": "error", "content": f"Error {response.status}: {error_text}"}
+            # Create session with explicit connector settings for better cleanup
+            connector = aiohttp.TCPConnector(
+                limit=1,  # Limit connections for this specific request
+                force_close=True,  # Force close connections
+                enable_cleanup_closed=True  # Enable cleanup of closed connections
+            )
+            session = aiohttp.ClientSession(connector=connector)
+            
+            try:
+                async with session.post(
+                    f"{self.base_url}/api/generate",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=timeout)
+                ) as response:
+                    if response.status == 200:
+                        try:
+                            async for line in response.content:
+                                if line:
+                                    try:
+                                        chunk = json.loads(line.decode('utf-8'))
+                                        
+                                        # Yield thinking content if available
+                                        if 'thinking' in chunk and chunk['thinking']:
+                                            yield {"type": "thinking", "content": chunk['thinking']}
+                                        
+                                        # Yield response content if available
+                                        if 'response' in chunk and chunk['response']:
+                                            yield {"type": "response", "content": chunk['response']}
+                                        
+                                        if chunk.get('done', False):
+                                            break
+                                    except json.JSONDecodeError:
+                                        continue
+                        except asyncio.CancelledError:
+                            # Handle graceful cancellation (e.g., when user pauses)
+                            yield {"type": "info", "content": "Response cancelled by user"}
+                            return
+                    elif response.status == 400 and think:
+                        # Check if the error is about thinking not being supported
+                        error_text = await response.text()
+                        if "does not support thinking" in error_text:
+                            # Add model to non-thinking cache for future requests
+                            import streamlit as st
+                            st.session_state.non_thinking_models.add(model)
+                            
+                            # Retry without thinking
+                            yield {"type": "info", "content": f"Model {model} doesn't support thinking - switching to standard mode for future requests"}
+                            
+                            # Recursive call without thinking - but first close this session
+                            if session and not session.closed:
+                                await session.close()
+                                session = None
+                            
+                            async for chunk in self.generate_stream(model, prompt, system, think=False, timeout=timeout):
+                                yield chunk
+                            return
                         else:
-                            error_text = await response.text()
                             yield {"type": "error", "content": f"Error {response.status}: {error_text}"}
-                except asyncio.CancelledError:
-                    # Handle cancellation at the request level
-                    yield {"type": "info", "content": "Request cancelled"}
-                    return
-                except asyncio.TimeoutError:
-                    yield {"type": "error", "content": "Error: Request timeout"}
-                except Exception as e:
-                    yield {"type": "error", "content": f"Error: {str(e)}"}
+                    else:
+                        error_text = await response.text()
+                        yield {"type": "error", "content": f"Error {response.status}: {error_text}"}
+            except asyncio.CancelledError:
+                # Handle cancellation at the request level
+                yield {"type": "info", "content": "Request cancelled"}
+                return
+            except asyncio.TimeoutError:
+                yield {"type": "error", "content": "Error: Request timeout"}
+            except Exception as e:
+                yield {"type": "error", "content": f"Error: {str(e)}"}
         except asyncio.CancelledError:
             # Handle cancellation at the session level - don't yield anything, just return
             return
         except Exception as e:
             yield {"type": "error", "content": f"Connection error: {str(e)}"}
+        finally:
+            # Ensure session is always closed
+            if session and not session.closed:
+                try:
+                    await session.close()
+                except Exception:
+                    # Ignore errors during cleanup
+                    pass
 
 
 class StreamlitBackroomApp:
@@ -961,6 +987,13 @@ Your response should be conversational and engaging."""
                         loop.run_until_complete(task)
                     except asyncio.CancelledError:
                         pass
+                
+                # Give a small moment for async cleanup to complete
+                try:
+                    loop.run_until_complete(asyncio.sleep(0.1))
+                except Exception:
+                    pass
+                
                 # Properly close the event loop
                 try:
                     loop.close()
