@@ -819,7 +819,7 @@ Your response should be conversational and engaging."""
                 "Comedian": "😄",
                 "Analyst": "📊",
                 "Dreamer": "💭",
-                "Pragmatist": "⚙"
+                "Pragmatist": "⚙️"
             }
             
             # Create styled persona display with colored background
@@ -1043,8 +1043,8 @@ Your response should be conversational and engaging."""
                     "Note-Taker": "📝", 
                     "Philosopher": "🤔",
                     "Scientist": "🔬",
-                    "Creative Writer": "✏",
-                    "Debate Enthusiast": "⚖",
+                    "Creative Writer": "✍️",
+                    "Debate Enthusiast": "⚖️",
                     "Optimist": "😊",
                     "Skeptic": "🤨",
                     "Historian": "📚",
@@ -1055,7 +1055,7 @@ Your response should be conversational and engaging."""
                     "Comedian": "😄",
                     "Analyst": "📊",
                     "Dreamer": "💭",
-                    "Pragmatist": "⚙"
+                    "Pragmatist": "⚙️"
                 }
                 
                 for persona in enabled_personas:
